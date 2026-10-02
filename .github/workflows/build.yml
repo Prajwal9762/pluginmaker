@@ -1,10 +1,13 @@
-name: Build Minecraft Plugins
+name: Build MineCoinsPlugins
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -14,115 +17,89 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "25"
-          cache: maven
-
-      - name: Prepare workspace
-        run: |
-          rm -rf build-work build-output
-          mkdir -p build-work
-          mkdir -p build-output
-
-      - name: Extract all ZIP files
+      - name: Extract all plugin ZIPs
         shell: bash
         run: |
-          shopt -s nullglob
+          set -euo pipefail
+          rm -rf build-input
+          mkdir -p build-input
 
-          zips=( *.zip )
+          shopt -s nullglob
+          zips=(./*.zip)
 
           if [ ${#zips[@]} -eq 0 ]; then
-            echo "No ZIP files found."
+            echo "ERROR: No ZIP files found in repository root."
             exit 1
           fi
 
           for zip in "${zips[@]}"; do
-            echo "======================================"
+            name="$(basename "$zip" .zip)"
             echo "Extracting: $zip"
-            echo "======================================"
-
-            folder="${zip%.zip}"
-            mkdir -p "build-work/$folder"
-
-            unzip -o "$zip" -d "build-work/$folder"
+            mkdir -p "build-input/$name"
+            unzip -q -o "$zip" -d "build-input/$name"
           done
 
-      - name: Find Maven projects
-        id: projects
-        shell: bash
-        run: |
           echo "Maven projects found:"
+          find build-input -type f -name pom.xml -print
 
-          find build-work \
-            -type f \
-            -name "pom.xml" \
-            -print
+      - name: Setup Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: |
+            build-input/**/pom.xml
 
-          count=$(find build-work -type f -name "pom.xml" | wc -l)
-
-          if [ "$count" -eq 0 ]; then
-            echo "ERROR: No pom.xml found."
-            exit 1
-          fi
-
-      - name: Build all Maven projects
+      - name: Build every Maven plugin
         shell: bash
         run: |
-          success=0
-          failed=0
+          set -euo pipefail
+          found=0
 
-          while IFS= read -r pom; do
+          while IFS= read -r -d '' pom; do
+            found=1
             project_dir="$(dirname "$pom")"
+            echo "========================================"
+            echo "Building: $project_dir"
+            echo "========================================"
 
-            echo ""
-            echo "======================================"
-            echo "BUILDING"
-            echo "$project_dir"
-            echo "======================================"
+            (
+              cd "$project_dir"
+              mvn -B -U -DskipTests clean package
+            )
+          done < <(find build-input -type f -name pom.xml -print0)
 
-            if mvn -B -f "$pom" clean package -DskipTests; then
-
-              echo "✅ BUILD SUCCESS"
-              success=$((success + 1))
-
-              find "$project_dir/target" \
-                -maxdepth 1 \
-                -type f \
-                -name "*.jar" \
-                -exec cp {} build-output/ \;
-
-            else
-
-              echo "❌ BUILD FAILED"
-              failed=$((failed + 1))
-
-            fi
-
-          done < <(find build-work -type f -name "pom.xml" | sort)
-
-          echo ""
-          echo "======================================"
-          echo "BUILD SUMMARY"
-          echo "======================================"
-          echo "Successful: $success"
-          echo "Failed:     $failed"
-          echo "======================================"
-
-          echo ""
-          echo "Generated JAR files:"
-          find build-output -type f -name "*.jar" -print
-
-          if [ "$success" -eq 0 ]; then
-            echo "No plugin was successfully built."
+          if [ "$found" -eq 0 ]; then
+            echo "ERROR: No pom.xml was found in any extracted ZIP."
             exit 1
           fi
 
-      - name: Upload all successful JARs
+      - name: Verify JAR output
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "========================================"
+          echo "Built plugin JARs"
+          echo "========================================"
+
+          mapfile -t jars < <(
+            find build-input -type f -path '*/target/*.jar' \
+              ! -name '*-sources.jar' \
+              ! -name '*-javadoc.jar' \
+              -print
+          )
+
+          if [ ${#jars[@]} -eq 0 ]; then
+            echo "ERROR: Maven completed but no plugin JAR was found."
+            exit 1
+          fi
+
+          printf '%s\n' "${jars[@]}"
+
+      - name: Upload all plugin JARs
         uses: actions/upload-artifact@v4
         with:
-          name: Minecraft-Plugins
-          path: build-output/*.jar
+          name: MineCoinsPlugins
+          path: build-input/**/target/*.jar
           if-no-files-found: error

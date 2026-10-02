@@ -1,0 +1,47 @@
+```yaml
+name: Build MineCoinsPlugins
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract CoinCore
+        run: |
+          unzip CoinCore-1.0.1-complete.zip -d plugin
+
+          echo "Extracted files:"
+          find plugin -maxdepth 5 -type f
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: plugin/CoinCore-1.0.1-complete/source/pom.xml
+
+      - name: Build CoinCore
+        working-directory: plugin/CoinCore-1.0.1-complete/source
+        run: mvn clean package
+
+      - name: Show build output
+        run: |
+          echo "Built JAR files:"
+          find plugin/CoinCore-1.0.1-complete/source/target -maxdepth 1 -type f -name "*.jar" -print
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoinCore-1.0.1
+          path: plugin/CoinCore-1.0.1-complete/source/target/*.jar
+```

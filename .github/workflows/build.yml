@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      jar_name:
+        description: "Name for the built .jar (without .jar). Empty = use each ZIP's name"
+        required: false
+        default: ""
       paper_version:
         description: "paper-api version (leave empty to use the pom.xml value)"
         required: false
@@ -22,8 +26,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    # Change these defaults if you want push builds to use a specific version
     env:
+      JAR_NAME_INPUT: ${{ github.event.inputs.jar_name }}
       PAPER_VERSION: ${{ github.event.inputs.paper_version }}
       JAVA_RELEASE: ${{ github.event.inputs.java_release || '25' }}
 
@@ -38,19 +42,23 @@ jobs:
           rm -rf build-input
           mkdir -p build-input
 
-          shopt -s nullglob
-          zips=(./*.zip)
+          mapfile -t zips < <(find . -type f -iname '*.zip' \
+            -not -path './build-input/*' -not -path './.git/*' | sort)
 
           if [ ${#zips[@]} -eq 0 ]; then
-            echo "ERROR: No ZIP files found in repository root."
+            echo "ERROR: No ZIP files found in the repository."
             exit 1
           fi
 
           for zip in "${zips[@]}"; do
-            name="$(basename "$zip" .zip)"
-            echo "Extracting: $zip"
-            mkdir -p "build-input/$name"
-            unzip -q -o "$zip" -d "build-input/$name"
+            name="$(basename "$zip")"
+            name="${name%.*}"
+            target="build-input/$name"
+            n=2
+            while [ -e "$target" ]; do target="build-input/${name}-$n"; n=$((n+1)); done
+            echo "Extracting: $zip -> $target"
+            mkdir -p "$target"
+            unzip -q -o "$zip" -d "$target"
           done
 
           echo "Maven projects found:"
@@ -65,21 +73,43 @@ jobs:
           cache-dependency-path: |
             build-input/**/pom.xml
 
-      - name: Build every Maven plugin
+      - name: Build every plugin and name the JARs
         shell: bash
         run: |
           set -euo pipefail
-          found=0
+          mkdir -p dist
+
+          # --- chosen jar name (sanitized) ---
+          JAR_NAME="${JAR_NAME_INPUT:-}"
+          JAR_NAME="${JAR_NAME%.jar}"
+          JAR_NAME="$(printf '%s' "$JAR_NAME" | tr -c 'A-Za-z0-9._-' '_')"
+          JAR_NAME="${JAR_NAME%_}"
 
           EXTRA_ARGS=("-Djava.version=${JAVA_RELEASE}")
           if [ -n "${PAPER_VERSION:-}" ]; then
             EXTRA_ARGS+=("-Dpaper.version=${PAPER_VERSION}")
           fi
           echo "Maven overrides: ${EXTRA_ARGS[*]}"
+          echo "Requested jar name: '${JAR_NAME:-<use zip names>}'"
+
+          total=$(find build-input -type f -name pom.xml -not -path '*/target/*' | wc -l)
+          if [ "$total" -eq 0 ]; then
+            echo "ERROR: No pom.xml was found in any extracted ZIP."
+            exit 1
+          fi
+
+          {
+            echo "## Built plugins"
+            echo ""
+            echo "| ZIP | JAR |"
+            echo "|-----|-----|"
+          } >> "$GITHUB_STEP_SUMMARY"
 
           while IFS= read -r -d '' pom; do
-            found=1
             project_dir="$(dirname "$pom")"
+            rel="${pom#build-input/}"
+            zipname="${rel%%/*}"
+
             echo "========================================"
             echo "Building: $project_dir"
             echo "========================================"
@@ -88,39 +118,54 @@ jobs:
               cd "$project_dir"
               mvn -B -ntp -U -DskipTests "${EXTRA_ARGS[@]}" clean package
             )
-          done < <(find build-input -type f -name pom.xml -not -path '*/target/*' -print0)
 
-          if [ "$found" -eq 0 ]; then
-            echo "ERROR: No pom.xml was found in any extracted ZIP."
-            exit 1
-          fi
+            # --- pick the real plugin jar ---
+            mapfile -t jars < <(find "$project_dir/target" -maxdepth 1 -type f -name '*.jar' \
+              ! -name 'original-*' ! -name '*-sources.jar' ! -name '*-javadoc.jar')
+            if [ ${#jars[@]} -eq 0 ]; then
+              echo "ERROR: Maven finished but no jar found in $project_dir/target"
+              exit 1
+            fi
+            built="$(ls -S "${jars[@]}" | head -n1)"
+
+            # --- decide the final name ---
+            in_zip=$(find "build-input/$zipname" -type f -name pom.xml -not -path '*/target/*' | wc -l)
+            if [ -z "$JAR_NAME" ]; then
+              base="$zipname"
+            elif [ "$total" -eq 1 ]; then
+              base="$JAR_NAME"
+            else
+              base="${JAR_NAME}-${zipname}"
+            fi
+            if [ "$in_zip" -gt 1 ]; then
+              base="${base}-$(basename "$project_dir")"
+            fi
+            final="$base"
+            n=2
+            while [ -e "dist/${final}.jar" ]; do final="${base}-${n}"; n=$((n+1)); done
+
+            cp "$built" "dist/${final}.jar"
+            echo "=> dist/${final}.jar"
+            echo "| ${zipname}.zip | ${final}.jar |" >> "$GITHUB_STEP_SUMMARY"
+          done < <(find build-input -type f -name pom.xml -not -path '*/target/*' -print0)
 
       - name: Verify JAR output
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t jars < <(
-            find build-input -type f -path '*/target/*.jar' \
-              ! -name '*-sources.jar' \
-              ! -name '*-javadoc.jar' \
-              ! -name 'original-*.jar' \
-              -print
-          )
-
+          shopt -s nullglob
+          jars=(dist/*.jar)
           if [ ${#jars[@]} -eq 0 ]; then
-            echo "ERROR: Maven completed but no plugin JAR was found."
+            echo "ERROR: no plugin JAR was produced."
             exit 1
           fi
-
           echo "Built plugin JARs:"
-          printf '%s\n' "${jars[@]}"
+          ls -la dist/
 
       - name: Upload all plugin JARs
         uses: actions/upload-artifact@v4
         with:
           name: MineCoinsPlugins
-          path: |
-            build-input/**/target/*.jar
-            !build-input/**/target/original-*.jar
+          path: dist/*.jar
           if-no-files-found: error
           retention-days: 30

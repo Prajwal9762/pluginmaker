@@ -7,8 +7,8 @@ on:
 
   workflow_dispatch:
     inputs:
-      create_release:
-        description: "Create GitHub Release"
+      make_release:
+        description: "Create a GitHub Release with the built JAR"
         required: false
         type: boolean
         default: false
@@ -18,290 +18,238 @@ permissions:
 
 jobs:
   build:
-    name: Build MineChatVote
+    name: Build MineChatVote Plugin
     runs-on: ubuntu-latest
 
     steps:
 
-      # ==========================================
+      # ============================================================
       # CHECKOUT
-      # ==========================================
-
-      - name: Checkout
+      # ============================================================
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-
-      # ==========================================
-      # FIND ZIP
-      # ==========================================
-
-      - name: Find plugin ZIP
+      # ============================================================
+      # SHOW REPOSITORY
+      # ============================================================
+      - name: Show repository files
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          ZIP=$(find . \
-            -maxdepth 2 \
-            -type f \
-            -iname "*.zip" \
-            -not -path "./.git/*" \
-            | head -n 1)
+          echo "======================================"
+          echo "Repository contents"
+          echo "======================================"
 
-          if [ -z "$ZIP" ]; then
-            echo "::error::No plugin ZIP found."
+          find . -maxdepth 3 -type f | sort
+
+      # ============================================================
+      # FIND PLUGIN ZIP
+      # ============================================================
+      - name: Find MineChatVote ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_COUNT=$(find . -maxdepth 1 -type f -iname "*.zip" | wc -l)
+
+          if [ "$ZIP_COUNT" -eq 0 ]; then
+            echo "::error::No plugin ZIP file found in repository root."
+            echo "Expected something like:"
+            echo "MineChatVote.zip"
             exit 1
           fi
 
-          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          if [ "$ZIP_COUNT" -gt 1 ]; then
+            echo "::error::Multiple ZIP files found."
+            find . -maxdepth 1 -type f -iname "*.zip"
+            echo "This workflow expects one plugin ZIP."
+            exit 1
+          fi
 
-          echo "Found plugin:"
-          echo "$ZIP"
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
+          echo "Found ZIP:"
+          echo "$ZIP_FILE"
 
-      # ==========================================
+          echo "PLUGIN_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      # ============================================================
       # EXTRACT
-      # ==========================================
-
+      # ============================================================
       - name: Extract plugin
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           rm -rf build
-
           mkdir -p build
 
-          unzip -q -o "$ZIP" -d build
+          echo "Extracting:"
+          echo "$PLUGIN_ZIP"
 
-          echo "Extracted:"
-          find build -type f | sort
+          unzip -q -o "$PLUGIN_ZIP" -d build
 
+          echo ""
+          echo "Extracted files:"
+          find build -maxdepth 6 -type f | sort
 
-      # ==========================================
+      # ============================================================
       # FIND POM
-      # ==========================================
-
-      - name: Locate Maven project
+      # ============================================================
+      - name: Find Maven project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          POM=$(find build \
-            -type f \
-            -name "pom.xml" \
-            -not -path "*/target/*" \
-            | head -n 1)
+          mapfile -t POMS < <(
+            find build \
+              -type f \
+              -name "pom.xml" \
+              -not -path "*/target/*"
+          )
 
-          if [ -z "$POM" ]; then
-            echo "::error::No pom.xml found inside ZIP."
+          if [ "${#POMS[@]}" -eq 0 ]; then
+            echo "::error::No pom.xml found inside the plugin ZIP."
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$POM")
+          if [ "${#POMS[@]}" -gt 1 ]; then
+            echo "::error::Multiple pom.xml files found."
+            printf '%s\n' "${POMS[@]}"
+            exit 1
+          fi
 
-          echo "POM:"
-          echo "$POM"
+          POM="${POMS[0]}"
+          PROJECT_DIR="$(dirname "$POM")"
+
+          echo "======================================"
+          echo "Maven project"
+          echo "======================================"
+          echo "POM: $POM"
+          echo "Project: $PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-
-      # ==========================================
-      # SETUP JAVA
-      # ==========================================
-
+      # ============================================================
+      # SETUP JAVA 21
+      # ============================================================
       - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
+          cache: maven
+          cache-dependency-path: "${{ env.PROJECT_DIR }}/pom.xml"
 
-
-      # ==========================================
-      # CREATE MAVEN SETTINGS
-      # ==========================================
-
-      - name: Configure Maven repositories
+      # ============================================================
+      # CHECK JAVA + MAVEN
+      # ============================================================
+      - name: Check Java and Maven
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          cat > "$RUNNER_TEMP/settings.xml" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
-                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0
-                    https://maven.apache.org/xsd/settings-1.2.0.xsd">
+          echo "======================================"
+          echo "Java"
+          echo "======================================"
 
-            <profiles>
-
-              <profile>
-
-                <id>minechat-build</id>
-
-                <repositories>
-
-                  <repository>
-                    <id>papermc</id>
-                    <url>https://repo.papermc.io/repository/maven-public/</url>
-                    <releases>
-                      <enabled>true</enabled>
-                    </releases>
-                    <snapshots>
-                      <enabled>true</enabled>
-                    </snapshots>
-                  </repository>
-
-                  <repository>
-                    <id>placeholderapi</id>
-                    <url>https://repo.helpch.at/releases/</url>
-                    <releases>
-                      <enabled>true</enabled>
-                    </releases>
-                    <snapshots>
-                      <enabled>false</enabled>
-                    </snapshots>
-                  </repository>
-
-                  <repository>
-                    <id>jitpack</id>
-                    <url>https://jitpack.io</url>
-                    <releases>
-                      <enabled>true</enabled>
-                    </releases>
-                    <snapshots>
-                      <enabled>true</enabled>
-                    </snapshots>
-                  </repository>
-
-                  <repository>
-                    <id>central</id>
-                    <url>https://repo.maven.apache.org/maven2</url>
-                    <releases>
-                      <enabled>true</enabled>
-                    </releases>
-                    <snapshots>
-                      <enabled>false</enabled>
-                    </snapshots>
-                  </repository>
-
-                </repositories>
-
-              </profile>
-
-            </profiles>
-
-            <activeProfiles>
-              <activeProfile>minechat-build</activeProfile>
-            </activeProfiles>
-
-          </settings>
-          EOF
-
-          echo "Maven settings created."
-
-
-      # ==========================================
-      # VERIFY PLACEHOLDERAPI
-      # ==========================================
-
-      - name: Verify PlaceholderAPI repository
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Checking PlaceholderAPI 2.11.6..."
-
-          curl -fL \
-            --retry 3 \
-            --retry-delay 2 \
-            -o /dev/null \
-            "https://repo.helpch.at/releases/me/clip/placeholderapi/2.11.6/placeholderapi-2.11.6.jar"
-
-          echo "PlaceholderAPI 2.11.6 is reachable."
-
-
-      # ==========================================
-      # SHOW VERSIONS
-      # ==========================================
-
-      - name: Show Java and Maven
-        shell: bash
-        run: |
           java -version
+
+          echo ""
+          echo "======================================"
+          echo "Maven"
+          echo "======================================"
+
           mvn -version
 
+      # ============================================================
+      # SHOW POM
+      # ============================================================
+      - name: Show POM
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "pom.xml"
+          echo "======================================"
 
-      # ==========================================
+          cat "$PROJECT_DIR/pom.xml"
+
+      # ============================================================
       # BUILD
-      # ==========================================
-
+      # ============================================================
       - name: Build MineChatVote
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           cd "$PROJECT_DIR"
 
-          echo "=========================================="
+          echo "======================================"
           echo "Building MineChatVote"
-          echo "=========================================="
+          echo "======================================"
 
-          mvn -B -ntp -U \
-            -s "$RUNNER_TEMP/settings.xml" \
-            clean package \
-            -DskipTests
+          mvn \
+            --batch-mode \
+            --no-transfer-progress \
+            -U \
+            clean \
+            package
 
-
-      # ==========================================
+      # ============================================================
       # FIND JAR
-      # ==========================================
-
+      # ============================================================
       - name: Find built JAR
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          echo "Target contents:"
+          echo "======================================"
+          echo "Build output"
+          echo "======================================"
+
           find "$PROJECT_DIR/target" \
             -maxdepth 1 \
             -type f \
-            -print || true
-
-          JAR=$(find "$PROJECT_DIR/target" \
-            -maxdepth 1 \
-            -type f \
             -name "*.jar" \
-            ! -name "*-sources.jar" \
-            ! -name "*-javadoc.jar" \
-            ! -name "original-*.jar" \
-            | head -n 1)
+            -print
 
-          if [ -z "$JAR" ]; then
-            echo "::error::Maven finished but no plugin JAR was created."
+          mapfile -t JARS < <(
+            find "$PROJECT_DIR/target" \
+              -maxdepth 1 \
+              -type f \
+              -name "*.jar" \
+              ! -name "original-*.jar" \
+              ! -name "*-sources.jar" \
+              ! -name "*-javadoc.jar"
+          )
+
+          if [ "${#JARS[@]}" -eq 0 ]; then
+            echo "::error::No usable plugin JAR was produced."
+            echo ""
+            echo "Full target directory:"
+            find "$PROJECT_DIR/target" -maxdepth 2 -type f -print
             exit 1
           fi
 
-          echo "Found:"
-          echo "$JAR"
+          echo ""
+          echo "Selected JAR:"
+          printf '%s\n' "${JARS[@]}"
 
           rm -rf release
           mkdir -p release
 
-          cp "$JAR" release/MineChatVote.jar
+          # This plugin produces one JAR.
+          cp "${JARS[0]}" "release/MineChatVote.jar"
 
           echo ""
-          echo "=========================================="
-          echo "FINAL JAR"
-          echo "=========================================="
-
+          echo "Final JAR:"
           ls -lh release/MineChatVote.jar
 
-
-      # ==========================================
-      # UPLOAD
-      # ==========================================
-
-      - name: Upload MineChatVote
+      # ============================================================
+      # UPLOAD ARTIFACT
+      # ============================================================
+      - name: Upload MineChatVote JAR
         uses: actions/upload-artifact@v4
         with:
           name: MineChatVote
@@ -309,16 +257,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-
-      # ==========================================
-      # RELEASE
-      # ==========================================
-
+      # ============================================================
+      # GITHUB RELEASE
+      # ============================================================
       - name: Create GitHub Release
-        if: ${{ inputs.create_release == true }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.make_release == true }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v${{ github.run_number }}"
-          name: "MineChatVote v${{ github.run_number }}"
+          tag_name: "minechatvote-${{ github.run_number }}"
+          name: "MineChatVote Build ${{ github.run_number }}"
           files: release/MineChatVote.jar
           generate_release_notes: true

@@ -1,14 +1,25 @@
-name: Build MineChatVote
+name: Build MineVotePlugins
 
 on:
   push:
     branches:
       - main
-
   workflow_dispatch:
     inputs:
+      jar_name:
+        description: "Name for the built JAR(s), without .jar (leave empty to keep Maven's own name)"
+        required: false
+        default: ""
+      paper_version:
+        description: "paper-api version (leave empty to use the pom.xml value)"
+        required: false
+        default: ""
+      java_release:
+        description: "Java release level (must match your server's Java; Paper 1.21.x = 21)"
+        required: false
+        default: "21"
       make_release:
-        description: "Create a GitHub Release with the built JAR"
+        description: "Also publish a GitHub Release with the JAR(s) attached"
         required: false
         type: boolean
         default: false
@@ -18,253 +29,143 @@ permissions:
 
 jobs:
   build:
-    name: Build MineChatVote Plugin
     runs-on: ubuntu-latest
 
-    steps:
+    env:
+      JAR_NAME: ${{ github.event.inputs.jar_name }}
+      PAPER_VERSION: ${{ github.event.inputs.paper_version }}
+      JAVA_RELEASE: ${{ github.event.inputs.java_release || '21' }}
 
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
-      - name: Checkout repository
+    steps:
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ============================================================
-      # SHOW REPOSITORY
-      # ============================================================
-      - name: Show repository files
+      - name: Prepare build input (ZIPs or plain Maven project)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          rm -rf build-input
+          mkdir -p build-input
 
-          echo "======================================"
-          echo "Repository contents"
-          echo "======================================"
+          shopt -s nullglob
+          zips=(./*.zip)
 
-          find . -maxdepth 3 -type f | sort
-
-      # ============================================================
-      # FIND PLUGIN ZIP
-      # ============================================================
-      - name: Find MineChatVote ZIP
-        shell: bash
-        run: |
-          set -e
-
-          ZIP_COUNT=$(find . -maxdepth 1 -type f -iname "*.zip" | wc -l)
-
-          if [ "$ZIP_COUNT" -eq 0 ]; then
-            echo "::error::No plugin ZIP file found in repository root."
-            echo "Expected something like:"
-            echo "MineChatVote.zip"
+          if [ ${#zips[@]} -gt 0 ]; then
+            for zip in "${zips[@]}"; do
+              name="$(basename "$zip" .zip)"
+              echo "Extracting: $zip"
+              mkdir -p "build-input/$name"
+              unzip -q -o "$zip" -d "build-input/$name"
+            done
+          elif [ -f pom.xml ]; then
+            echo "No ZIPs found - building the repository itself."
+            mkdir -p build-input/project
+            tar --exclude=./.git --exclude=./build-input --exclude=./release-jars -cf - . | tar -xf - -C build-input/project
+          else
+            echo "ERROR: No ZIP files and no pom.xml found in repository root."
             exit 1
           fi
 
-          if [ "$ZIP_COUNT" -gt 1 ]; then
-            echo "::error::Multiple ZIP files found."
-            find . -maxdepth 1 -type f -iname "*.zip"
-            echo "This workflow expects one plugin ZIP."
-            exit 1
-          fi
+          echo "Maven projects found:"
+          find build-input -type f -name pom.xml -not -path '*/target/*' -print
 
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
-
-          echo "Found ZIP:"
-          echo "$ZIP_FILE"
-
-          echo "PLUGIN_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
-
-      # ============================================================
-      # EXTRACT
-      # ============================================================
-      - name: Extract plugin
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf build
-          mkdir -p build
-
-          echo "Extracting:"
-          echo "$PLUGIN_ZIP"
-
-          unzip -q -o "$PLUGIN_ZIP" -d build
-
-          echo ""
-          echo "Extracted files:"
-          find build -maxdepth 6 -type f | sort
-
-      # ============================================================
-      # FIND POM
-      # ============================================================
-      - name: Find Maven project
-        shell: bash
-        run: |
-          set -e
-
-          mapfile -t POMS < <(
-            find build \
-              -type f \
-              -name "pom.xml" \
-              -not -path "*/target/*"
-          )
-
-          if [ "${#POMS[@]}" -eq 0 ]; then
-            echo "::error::No pom.xml found inside the plugin ZIP."
-            exit 1
-          fi
-
-          if [ "${#POMS[@]}" -gt 1 ]; then
-            echo "::error::Multiple pom.xml files found."
-            printf '%s\n' "${POMS[@]}"
-            exit 1
-          fi
-
-          POM="${POMS[0]}"
-          PROJECT_DIR="$(dirname "$POM")"
-
-          echo "======================================"
-          echo "Maven project"
-          echo "======================================"
-          echo "POM: $POM"
-          echo "Project: $PROJECT_DIR"
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-      # ============================================================
-      # SETUP JAVA 21
-      # ============================================================
-      - name: Setup Java 21
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: ${{ env.JAVA_RELEASE }}
           cache: maven
-          cache-dependency-path: "${{ env.PROJECT_DIR }}/pom.xml"
+          cache-dependency-path: |
+            build-input/**/pom.xml
 
-      # ============================================================
-      # CHECK JAVA + MAVEN
-      # ============================================================
-      - name: Check Java and Maven
+      - name: Build every Maven plugin
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          found=0
 
-          echo "======================================"
-          echo "Java"
-          echo "======================================"
+          EXTRA_ARGS=("-Djava.release=${JAVA_RELEASE}")
+          if [ -n "${PAPER_VERSION:-}" ]; then
+            EXTRA_ARGS+=("-Dpaper.version=${PAPER_VERSION}")
+          fi
+          echo "Maven overrides: ${EXTRA_ARGS[*]}"
 
-          java -version
+          while IFS= read -r -d '' pom; do
+            found=1
+            project_dir="$(dirname "$pom")"
+            echo "========================================"
+            echo "Building: $project_dir"
+            echo "========================================"
+            (
+              cd "$project_dir"
+              mvn -B -ntp -U -DskipTests "${EXTRA_ARGS[@]}" clean package
+            )
+          done < <(find build-input -type f -name pom.xml -not -path '*/target/*' -print0)
 
-          echo ""
-          echo "======================================"
-          echo "Maven"
-          echo "======================================"
-
-          mvn -version
-
-      # ============================================================
-      # SHOW POM
-      # ============================================================
-      - name: Show POM
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "pom.xml"
-          echo "======================================"
-
-          cat "$PROJECT_DIR/pom.xml"
-
-      # ============================================================
-      # BUILD
-      # ============================================================
-      - name: Build MineChatVote
-        shell: bash
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
-          echo "======================================"
-          echo "Building MineChatVote"
-          echo "======================================"
-
-          mvn \
-            --batch-mode \
-            --no-transfer-progress \
-            -U \
-            clean \
-            package
-
-      # ============================================================
-      # FIND JAR
-      # ============================================================
-      - name: Find built JAR
-        shell: bash
-        run: |
-          set -e
-
-          echo "======================================"
-          echo "Build output"
-          echo "======================================"
-
-          find "$PROJECT_DIR/target" \
-            -maxdepth 1 \
-            -type f \
-            -name "*.jar" \
-            -print
-
-          mapfile -t JARS < <(
-            find "$PROJECT_DIR/target" \
-              -maxdepth 1 \
-              -type f \
-              -name "*.jar" \
-              ! -name "original-*.jar" \
-              ! -name "*-sources.jar" \
-              ! -name "*-javadoc.jar"
-          )
-
-          if [ "${#JARS[@]}" -eq 0 ]; then
-            echo "::error::No usable plugin JAR was produced."
-            echo ""
-            echo "Full target directory:"
-            find "$PROJECT_DIR/target" -maxdepth 2 -type f -print
+          if [ "$found" -eq 0 ]; then
+            echo "ERROR: No pom.xml was found."
             exit 1
           fi
 
-          echo ""
-          echo "Selected JAR:"
-          printf '%s\n' "${JARS[@]}"
+      - name: Collect and rename JARs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t jars < <(
+            find build-input -type f -path '*/target/*.jar' \
+              ! -name '*-sources.jar' \
+              ! -name '*-javadoc.jar' \
+              ! -name 'original-*.jar' \
+              -print
+          )
 
-          rm -rf release
-          mkdir -p release
+          if [ ${#jars[@]} -eq 0 ]; then
+            echo "ERROR: Maven completed but no plugin JAR was found."
+            exit 1
+          fi
 
-          # This plugin produces one JAR.
-          cp "${JARS[0]}" "release/MineChatVote.jar"
+          rm -rf release-jars
+          mkdir -p release-jars
 
-          echo ""
-          echo "Final JAR:"
-          ls -lh release/MineChatVote.jar
+          multiple=0
+          [ ${#jars[@]} -gt 1 ] && multiple=1
 
-      # ============================================================
-      # UPLOAD ARTIFACT
-      # ============================================================
-      - name: Upload MineChatVote JAR
+          for jar in "${jars[@]}"; do
+            rel="${jar#build-input/}"
+            zipname="${rel%%/*}"
+
+            if [ -n "${JAR_NAME:-}" ]; then
+              if [ "$multiple" -eq 1 ]; then
+                out="release-jars/${JAR_NAME}-${zipname}.jar"
+              else
+                out="release-jars/${JAR_NAME}.jar"
+              fi
+            elif [ "$multiple" -eq 1 ]; then
+              out="release-jars/${zipname}-$(basename "$jar")"
+            else
+              out="release-jars/$(basename "$jar")"
+            fi
+
+            echo "Copying $jar -> $out"
+            cp "$jar" "$out"
+          done
+
+          echo "Final JARs:"
+          find release-jars -type f -name '*.jar' -print
+
+      - name: Upload all plugin JARs
         uses: actions/upload-artifact@v4
         with:
-          name: MineChatVote
-          path: release/MineChatVote.jar
+          name: MineVotePlugins
+          path: release-jars/*.jar
           if-no-files-found: error
           retention-days: 30
 
-      # ============================================================
-      # GITHUB RELEASE
-      # ============================================================
       - name: Create GitHub Release
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.make_release == true }}
+        if: ${{ github.event.inputs.make_release == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "minechatvote-${{ github.run_number }}"
-          name: "MineChatVote Build ${{ github.run_number }}"
-          files: release/MineChatVote.jar
+          tag_name: build-${{ github.run_number }}
+          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'MineVotePlugins' }} build ${{ github.run_number }}
+          files: release-jars/*.jar
           generate_release_notes: true

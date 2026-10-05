@@ -1,4 +1,4 @@
-name: Build MineVotePlugins
+name: Build CapacityCheck
 
 on:
   push:
@@ -44,6 +44,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf build-input
           mkdir -p build-input
 
@@ -57,17 +58,29 @@ jobs:
               mkdir -p "build-input/$name"
               unzip -q -o "$zip" -d "build-input/$name"
             done
+
           elif [ -f pom.xml ]; then
             echo "No ZIPs found - building the repository itself."
+
             mkdir -p build-input/project
-            tar --exclude=./.git --exclude=./build-input --exclude=./release-jars -cf - . | tar -xf - -C build-input/project
+
+            tar \
+              --exclude=./.git \
+              --exclude=./build-input \
+              --exclude=./release-jars \
+              -cf - . | tar -xf - -C build-input/project
+
           else
             echo "ERROR: No ZIP files and no pom.xml found in repository root."
             exit 1
           fi
 
           echo "Maven projects found:"
-          find build-input -type f -name pom.xml -not -path '*/target/*' -print
+          find build-input \
+            -type f \
+            -name pom.xml \
+            -not -path '*/target/*' \
+            -print
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -82,25 +95,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           found=0
 
           EXTRA_ARGS=("-Djava.release=${JAVA_RELEASE}")
+
           if [ -n "${PAPER_VERSION:-}" ]; then
             EXTRA_ARGS+=("-Dpaper.version=${PAPER_VERSION}")
           fi
+
           echo "Maven overrides: ${EXTRA_ARGS[*]}"
 
           while IFS= read -r -d '' pom; do
             found=1
+
             project_dir="$(dirname "$pom")"
+
             echo "========================================"
             echo "Building: $project_dir"
             echo "========================================"
+
             (
               cd "$project_dir"
-              mvn -B -ntp -U -DskipTests "${EXTRA_ARGS[@]}" clean package
+
+              mvn -B -ntp -U \
+                -DskipTests \
+                "${EXTRA_ARGS[@]}" \
+                clean package
             )
-          done < <(find build-input -type f -name pom.xml -not -path '*/target/*' -print0)
+
+          done < <(
+            find build-input \
+              -type f \
+              -name pom.xml \
+              -not -path '*/target/*' \
+              -print0
+          )
 
           if [ "$found" -eq 0 ]; then
             echo "ERROR: No pom.xml was found."
@@ -111,8 +141,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           mapfile -t jars < <(
-            find build-input -type f -path '*/target/*.jar' \
+            find build-input \
+              -type f \
+              -path '*/target/*.jar' \
               ! -name '*-sources.jar' \
               ! -name '*-javadoc.jar' \
               ! -name 'original-*.jar' \
@@ -131,32 +164,43 @@ jobs:
           [ ${#jars[@]} -gt 1 ] && multiple=1
 
           for jar in "${jars[@]}"; do
+
             rel="${jar#build-input/}"
             zipname="${rel%%/*}"
 
             if [ -n "${JAR_NAME:-}" ]; then
+
               if [ "$multiple" -eq 1 ]; then
                 out="release-jars/${JAR_NAME}-${zipname}.jar"
               else
                 out="release-jars/${JAR_NAME}.jar"
               fi
+
             elif [ "$multiple" -eq 1 ]; then
+
               out="release-jars/${zipname}-$(basename "$jar")"
+
             else
+
               out="release-jars/$(basename "$jar")"
+
             fi
 
             echo "Copying $jar -> $out"
+
             cp "$jar" "$out"
           done
 
           echo "Final JARs:"
-          find release-jars -type f -name '*.jar' -print
+          find release-jars \
+            -type f \
+            -name '*.jar' \
+            -print
 
-      - name: Upload all plugin JARs
+      - name: Upload all CapacityCheck plugin JARs
         uses: actions/upload-artifact@v4
         with:
-          name: MineVotePlugins
+          name: CapacityCheck
           path: release-jars/*.jar
           if-no-files-found: error
           retention-days: 30
@@ -166,6 +210,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'MineVotePlugins' }} build ${{ github.run_number }}
+          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'CapacityCheck' }} build ${{ github.run_number }}
           files: release-jars/*.jar
           generate_release_notes: true

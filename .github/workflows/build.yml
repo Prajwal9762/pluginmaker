@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      jar_name:
+        description: "Name for the built JAR(s), without .jar (leave empty to keep Maven's own name)"
+        required: false
+        default: ""
       paper_version:
         description: "paper-api version (leave empty to use the pom.xml value)"
         required: false
@@ -14,16 +18,21 @@ on:
         description: "Java release level for compiling"
         required: false
         default: "25"
+      make_release:
+        description: "Also publish a GitHub Release with the JAR(s) attached"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
-    # Change these defaults if you want push builds to use a specific version
     env:
+      JAR_NAME: ${{ github.event.inputs.jar_name }}
       PAPER_VERSION: ${{ github.event.inputs.paper_version }}
       JAVA_RELEASE: ${{ github.event.inputs.java_release || '25' }}
 
@@ -56,11 +65,11 @@ jobs:
           echo "Maven projects found:"
           find build-input -type f -name pom.xml -not -path '*/target/*' -print
 
-      - name: Setup Java 25
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '25'
+          java-version: ${{ env.JAVA_RELEASE }}
           cache: maven
           cache-dependency-path: |
             build-input/**/pom.xml
@@ -95,7 +104,7 @@ jobs:
             exit 1
           fi
 
-      - name: Verify JAR output
+      - name: Collect and rename JARs
         shell: bash
         run: |
           set -euo pipefail
@@ -112,15 +121,46 @@ jobs:
             exit 1
           fi
 
-          echo "Built plugin JARs:"
-          printf '%s\n' "${jars[@]}"
+          rm -rf release-jars
+          mkdir -p release-jars
+
+          multiple=0
+          [ ${#jars[@]} -gt 1 ] && multiple=1
+
+          for jar in "${jars[@]}"; do
+            rel="${jar#build-input/}"
+            zipname="${rel%%/*}"
+
+            if [ -n "${JAR_NAME:-}" ]; then
+              if [ "$multiple" -eq 1 ]; then
+                out="release-jars/${JAR_NAME}-${zipname}.jar"
+              else
+                out="release-jars/${JAR_NAME}.jar"
+              fi
+            else
+              out="release-jars/$(basename "$jar")"
+            fi
+
+            echo "Copying $jar -> $out"
+            cp "$jar" "$out"
+          done
+
+          echo "Final JARs:"
+          find release-jars -type f -name '*.jar' -print
 
       - name: Upload all plugin JARs
         uses: actions/upload-artifact@v4
         with:
           name: MineVotePlugins
-          path: |
-            build-input/**/target/*.jar
-            !build-input/**/target/original-*.jar
+          path: release-jars/*.jar
           if-no-files-found: error
-          retention-days: 30 this is build jar so make it like it works for alls zip files uploaded there and give a option at first where we can choos what a name of .jar files
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: ${{ github.event.inputs.make_release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'MineVotePlugins' }} build ${{ github.run_number }}
+          files: release-jars/*.jar
+          generate_release_notes: true

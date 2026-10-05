@@ -7,16 +7,6 @@ on:
 
   workflow_dispatch:
     inputs:
-      java_version:
-        description: "Java version"
-        required: false
-        default: "21"
-
-      paper_version:
-        description: "Paper API version (leave empty to use pom.xml)"
-        required: false
-        default: ""
-
       create_release:
         description: "Create GitHub Release"
         required: false
@@ -27,206 +17,168 @@ permissions:
   contents: write
 
 jobs:
+
   build:
+
     name: Build MineChatVote
     runs-on: ubuntu-latest
 
     steps:
 
-      # =========================================
-      # 1. CHECKOUT
-      # =========================================
+      # ==========================================
+      # CHECKOUT
+      # ==========================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # =========================================
-      # 2. FIND AND EXTRACT ZIP
-      # =========================================
-      - name: Extract MineChatVote ZIP
+
+      # ==========================================
+      # EXTRACT ZIP
+      # ==========================================
+
+      - name: Extract plugin ZIP
         shell: bash
         run: |
+
           set -euo pipefail
 
-          echo "========================================"
-          echo "Searching for plugin ZIP..."
-          echo "========================================"
-
-          ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' \
-            -not -path './.git/*' \
-            | head -n 1)"
+          ZIP=$(find . -maxdepth 2 -type f -name "*.zip" \
+            -not -path "./.git/*" | head -n 1)
 
           if [ -z "$ZIP" ]; then
-            echo "::error::No plugin ZIP file found!"
-            echo ""
-            echo "Repository contents:"
-            find . -maxdepth 3 -type f | sort
+            echo "::error::No plugin ZIP found."
             exit 1
           fi
 
-          echo "Found ZIP:"
+          echo "Using ZIP:"
           echo "$ZIP"
 
           rm -rf build
+
           mkdir -p build
 
           unzip -q -o "$ZIP" -d build
 
           echo ""
           echo "Extracted files:"
-          find build -maxdepth 5 -type f | sort
+          find build -type f | sort
 
-      # =========================================
-      # 3. FIND POM
-      # =========================================
+
+      # ==========================================
+      # FIND POM
+      # ==========================================
+
       - name: Locate Maven project
         shell: bash
         run: |
+
           set -euo pipefail
 
-          echo "========================================"
-          echo "Searching for pom.xml..."
-          echo "========================================"
-
-          POM="$(find build -type f -name pom.xml \
-            -not -path '*/target/*' \
-            | head -n 1)"
+          POM=$(find build \
+            -type f \
+            -name "pom.xml" \
+            -not -path "*/target/*" \
+            | head -n 1)
 
           if [ -z "$POM" ]; then
-            echo "::error::No pom.xml found inside extracted ZIP!"
-            echo ""
-            echo "Extracted files:"
-            find build -type f | sort
+            echo "::error::pom.xml not found."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$POM")"
+          PROJECT_DIR=$(dirname "$POM")
 
-          echo "POM found:"
+          echo "Found:"
           echo "$POM"
-
-          echo ""
-          echo "Maven project:"
-          echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      # =========================================
-      # 4. SETUP JAVA
-      # =========================================
-      - name: Setup Java
-        uses: actions/setup-java@v4
+
+      # ==========================================
+      # JAVA 21
+      # ==========================================
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: ${{ inputs.java_version || '21' }}
+          java-version: "21"
 
-      # =========================================
-      # 5. JAVA INFO
-      # =========================================
-      - name: Show Java and Maven versions
+
+      # ==========================================
+      # VERIFY
+      # ==========================================
+
+      - name: Verify Java
         shell: bash
         run: |
+
           java -version
+
           mvn -version
 
-      # =========================================
-      # 6. SHOW PROJECT
-      # =========================================
-      - name: Show project files
-        shell: bash
-        run: |
-          echo "========================================"
-          echo "Project:"
-          echo "$PROJECT_DIR"
-          echo "========================================"
 
-          find "$PROJECT_DIR" \
-            -type f \
-            -not -path '*/target/*' \
-            | sort
+      # ==========================================
+      # BUILD
+      # ==========================================
 
-      # =========================================
-      # 7. BUILD
-      # =========================================
       - name: Build MineChatVote
         shell: bash
         run: |
+
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          echo "========================================"
+          echo "=========================================="
           echo "Building MineChatVote"
-          echo "========================================"
+          echo "=========================================="
 
-          if [ -n "${{ inputs.paper_version }}" ]; then
+          mvn -B -ntp -U \
+            clean package \
+            -DskipTests
 
-            echo "Using Paper version:"
-            echo "${{ inputs.paper_version }}"
 
-            mvn -B -ntp clean package \
-              -DskipTests \
-              -Dpaper.version="${{ inputs.paper_version }}"
+      # ==========================================
+      # FIND JAR
+      # ==========================================
 
-          else
-
-            echo "Using Paper version from pom.xml"
-
-            mvn -B -ntp clean package \
-              -DskipTests
-
-          fi
-
-      # =========================================
-      # 8. FIND JAR
-      # =========================================
-      - name: Find built JAR
+      - name: Collect JAR
         shell: bash
         run: |
+
           set -euo pipefail
 
-          echo "========================================"
-          echo "Searching for built plugin JAR..."
-          echo "========================================"
-
-          find "$PROJECT_DIR/target" \
-            -maxdepth 1 \
-            -type f \
-            -name "*.jar" \
-            -print
-
-          JAR="$(find "$PROJECT_DIR/target" \
+          JAR=$(find "$PROJECT_DIR/target" \
             -maxdepth 1 \
             -type f \
             -name "*.jar" \
             ! -name "*-sources.jar" \
             ! -name "*-javadoc.jar" \
             ! -name "original-*.jar" \
-            | head -n 1)"
+            | head -n 1)
 
           if [ -z "$JAR" ]; then
-            echo "::error::No plugin JAR was created!"
-            echo ""
-            echo "Target directory:"
-            find "$PROJECT_DIR/target" -maxdepth 1 -type f -print || true
+            echo "::error::No plugin JAR found."
             exit 1
           fi
 
-          echo ""
-          echo "Built JAR:"
+          echo "Built:"
           echo "$JAR"
 
-          rm -rf release
           mkdir -p release
 
           cp "$JAR" release/MineChatVote.jar
 
           echo ""
-          echo "Final JAR:"
+          echo "Final plugin:"
           ls -lh release/MineChatVote.jar
 
-      # =========================================
-      # 9. UPLOAD ARTIFACT
-      # =========================================
+
+      # ==========================================
+      # ARTIFACT
+      # ==========================================
+
       - name: Upload MineChatVote
         uses: actions/upload-artifact@v4
         with:
@@ -235,14 +187,16 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # =========================================
-      # 10. GITHUB RELEASE
-      # =========================================
+
+      # ==========================================
+      # RELEASE
+      # ==========================================
+
       - name: Create GitHub Release
         if: ${{ inputs.create_release == true }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: MineChatVote v${{ github.run_number }}
+          tag_name: "v${{ github.run_number }}"
+          name: "MineChatVote v${{ github.run_number }}"
           files: release/MineChatVote.jar
           generate_release_notes: true

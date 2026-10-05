@@ -1,4 +1,4 @@
-name: Build MineCoinsPlugins
+name: Build MineVotePlugins
 
 on:
   push:
@@ -118,7 +118,7 @@ jobs:
       - name: Upload all plugin JARs
         uses: actions/upload-artifact@v4
         with:
-          name: MineCoinsPlugins
+          name: MineVotePlugins
           path: |
             build-input/**/target/*.jar
             !build-input/**/target/original-*.jar

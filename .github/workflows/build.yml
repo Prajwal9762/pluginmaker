@@ -13,9 +13,9 @@ on:
         default: "21"
 
       paper_version:
-        description: "Paper API version"
+        description: "Paper API version (leave empty to use pom.xml)"
         required: false
-        default: "1.21.1-R0.1-SNAPSHOT"
+        default: ""
 
       create_release:
         description: "Create GitHub Release"
@@ -32,69 +32,80 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      # =========================================
+      # -----------------------------------------
       # CHECKOUT
-      # =========================================
-      - name: Checkout repository
+      # -----------------------------------------
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # =========================================
+      # -----------------------------------------
+      # FIND PROJECT
+      # -----------------------------------------
+      - name: Locate Maven project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Searching for pom.xml..."
+
+          POM="$(find . -type f -name pom.xml \
+            -not -path './.git/*' \
+            | head -n 1)"
+
+          if [ -z "$POM" ]; then
+            echo "::error::No pom.xml found."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$POM")"
+
+          echo "POM: $POM"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      # -----------------------------------------
       # JAVA
-      # =========================================
+      # -----------------------------------------
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ github.event.inputs.java_version || '21' }}
+          java-version: ${{ inputs.java_version || '21' }}
           cache: maven
+          cache-dependency-path: |
+            **/pom.xml
 
-      # =========================================
-      # CHECK PROJECT
-      # =========================================
-      - name: Find MineChatVote project
+      # -----------------------------------------
+      # JAVA / MAVEN INFO
+      # -----------------------------------------
+      - name: Show Java and Maven versions
         shell: bash
         run: |
-          set -e
+          java -version
+          mvn -version
 
-          echo "Searching for pom.xml..."
-
-          POM=$(find . -type f -name pom.xml \
-            ! -path './.git/*' \
-            | head -n 1)
-
-          if [ -z "$POM" ]; then
-            echo "ERROR: pom.xml not found!"
-            exit 1
-          fi
-
-          echo "Found:"
-          echo "$POM"
-
-          PROJECT_DIR=$(dirname "$POM")
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-      # =========================================
+      # -----------------------------------------
       # SHOW PROJECT
-      # =========================================
-      - name: Show project files
+      # -----------------------------------------
+      - name: Show project structure
         shell: bash
         run: |
+          echo "========================================"
           echo "Project directory:"
           echo "$PROJECT_DIR"
+          echo "========================================"
 
-          echo ""
-          echo "Project files:"
-          find "$PROJECT_DIR" -maxdepth 5 -type f | sort
+          find "$PROJECT_DIR" \
+            -type f \
+            -not -path '*/target/*' \
+            | sort
 
-      # =========================================
+      # -----------------------------------------
       # BUILD
-      # =========================================
-      - name: Build MineChatVote
+      # -----------------------------------------
+      - name: Build plugin
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$PROJECT_DIR"
 
@@ -102,54 +113,65 @@ jobs:
           echo "Building MineChatVote"
           echo "========================================"
 
-          mvn -B -ntp clean package \
-            -DskipTests \
-            -Dpaper.version="${{ github.event.inputs.paper_version || '1.21.1-R0.1-SNAPSHOT' }}"
-
-      # =========================================
-      # FIND JAR
-      # =========================================
-      - name: Find built JAR
-        shell: bash
-        run: |
-          set -e
-
-          echo "Searching for JAR..."
-
-          find "$PROJECT_DIR/target" \
-            -type f \
-            -name "*.jar" \
-            ! -name "*-sources.jar" \
-            ! -name "*-javadoc.jar" \
-            -print
-
-          JAR=$(find "$PROJECT_DIR/target" \
-            -type f \
-            -name "*.jar" \
-            ! -name "*-sources.jar" \
-            ! -name "*-javadoc.jar" \
-            | head -n 1)
-
-          if [ -z "$JAR" ]; then
-            echo "ERROR: No JAR was produced!"
-            exit 1
+          if [ -n "${{ inputs.paper_version }}" ]; then
+            mvn -B -ntp clean package \
+              -DskipTests \
+              -Dpaper.version="${{ inputs.paper_version }}"
+          else
+            mvn -B -ntp clean package \
+              -DskipTests
           fi
 
-          echo "Found JAR:"
-          echo "$JAR"
+      # -----------------------------------------
+      # FIND JAR
+      # -----------------------------------------
+      - name: Collect plugin JAR
+        shell: bash
+        run: |
+          set -euo pipefail
 
           mkdir -p release
 
-          cp "$JAR" release/MineChatVote.jar
+          mapfile -t JARS < <(
+            find "$PROJECT_DIR/target" \
+              -maxdepth 1 \
+              -type f \
+              -name "*.jar" \
+              ! -name "*-sources.jar" \
+              ! -name "*-javadoc.jar" \
+              ! -name "original-*.jar" \
+              -print
+          )
+
+          if [ "${#JARS[@]}" -eq 0 ]; then
+            echo "::error::No plugin JAR was produced."
+            echo ""
+            echo "Contents of target:"
+            find "$PROJECT_DIR/target" -maxdepth 1 -type f -print || true
+            exit 1
+          fi
+
+          if [ "${#JARS[@]}" -gt 1 ]; then
+            echo "::error::Multiple plugin JARs found:"
+            printf '%s\n' "${JARS[@]}"
+            exit 1
+          fi
+
+          JAR="${JARS[0]}"
+
+          echo "Built JAR:"
+          echo "$JAR"
+
+          cp "$JAR" "release/MineChatVote.jar"
 
           echo ""
-          echo "Final plugin:"
+          echo "Final artifact:"
           ls -lh release/MineChatVote.jar
 
-      # =========================================
+      # -----------------------------------------
       # UPLOAD ARTIFACT
-      # =========================================
-      - name: Upload MineChatVote
+      # -----------------------------------------
+      - name: Upload plugin
         uses: actions/upload-artifact@v4
         with:
           name: MineChatVote
@@ -157,11 +179,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # =========================================
+      # -----------------------------------------
       # GITHUB RELEASE
-      # =========================================
+      # -----------------------------------------
       - name: Create GitHub Release
-        if: ${{ github.event.inputs.create_release == 'true' }}
+        if: ${{ inputs.create_release == true }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}

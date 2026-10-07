@@ -1,4 +1,4 @@
-name: Build OmniShop-source
+name: Build Votelinks-source
 
 on:
   push:
@@ -197,10 +197,10 @@ jobs:
             -name '*.jar' \
             -print
 
-      - name: Upload all OmniShop-source plugin JARs
+      - name: Upload all Votelinks-source plugin JARs
         uses: actions/upload-artifact@v4
         with:
-          name: OmniShop-source
+          name: Votelinks-source
           path: release-jars/*.jar
           if-no-files-found: error
           retention-days: 30
@@ -210,6 +210,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'OmniShop-source' }} build ${{ github.run_number }}
+          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'Votelinks-source' }} build ${{ github.run_number }}
           files: release-jars/*.jar
           generate_release_notes: true

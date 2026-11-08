@@ -1,4 +1,4 @@
-name: Build Votelinks-source
+name: Build DeathClone
 
 on:
   push:
@@ -197,10 +197,10 @@ jobs:
             -name '*.jar' \
             -print
 
-      - name: Upload all Votelinks-source plugin JARs
+      - name: Upload DeathClone plugin JAR
         uses: actions/upload-artifact@v4
         with:
-          name: Votelinks-source
+          name: DeathClone
           path: release-jars/*.jar
           if-no-files-found: error
           retention-days: 30
@@ -210,6 +210,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'Votelinks-source' }} build ${{ github.run_number }}
+          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'DeathClone' }} build ${{ github.run_number }}
           files: release-jars/*.jar
           generate_release_notes: true

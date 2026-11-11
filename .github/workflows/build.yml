@@ -1,28 +1,8 @@
-name: Build DeathClone
+name: Build ChatCraft APK
 
 on:
   push:
-    branches:
-      - main
   workflow_dispatch:
-    inputs:
-      jar_name:
-        description: "Name for the built JAR(s), without .jar (leave empty to keep Maven's own name)"
-        required: false
-        default: ""
-      paper_version:
-        description: "paper-api version (leave empty to use the pom.xml value)"
-        required: false
-        default: ""
-      java_release:
-        description: "Java release level (must match your server's Java; Paper 1.21.x = 21)"
-        required: false
-        default: "21"
-      make_release:
-        description: "Also publish a GitHub Release with the JAR(s) attached"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -30,186 +10,63 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      JAR_NAME: ${{ github.event.inputs.jar_name }}
-      PAPER_VERSION: ${{ github.event.inputs.paper_version }}
-      JAVA_RELEASE: ${{ github.event.inputs.java_release || '21' }}
-
+    timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Prepare build input (ZIPs or plain Maven project)
-        shell: bash
+      - name: Unzip the project (ChatCraft.zip in the repo root)
         run: |
-          set -euo pipefail
+          if ls ./*.zip >/dev/null 2>&1; then unzip -q -o "$(ls ./*.zip | head -n1)"; fi
+          SETTINGS=$(find . -name settings.gradle.kts -not -path "./.git/*" | head -n1)
+          test -n "$SETTINGS" || { echo "Project not found: upload ChatCraft.zip to the repo root"; exit 1; }
+          echo "PROJECT=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
 
-          rm -rf build-input
-          mkdir -p build-input
-
-          shopt -s nullglob
-          zips=(./*.zip)
-
-          if [ ${#zips[@]} -gt 0 ]; then
-            for zip in "${zips[@]}"; do
-              name="$(basename "$zip" .zip)"
-              echo "Extracting: $zip"
-              mkdir -p "build-input/$name"
-              unzip -q -o "$zip" -d "build-input/$name"
-            done
-
-          elif [ -f pom.xml ]; then
-            echo "No ZIPs found - building the repository itself."
-
-            mkdir -p build-input/project
-
-            tar \
-              --exclude=./.git \
-              --exclude=./build-input \
-              --exclude=./release-jars \
-              -cf - . | tar -xf - -C build-input/project
-
-          else
-            echo "ERROR: No ZIP files and no pom.xml found in repository root."
-            exit 1
-          fi
-
-          echo "Maven projects found:"
-          find build-input \
-            -type f \
-            -name pom.xml \
-            -not -path '*/target/*' \
-            -print
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ env.JAVA_RELEASE }}
-          cache: maven
-          cache-dependency-path: |
-            build-input/**/pom.xml
+          java-version: "17"
 
-      - name: Build every Maven plugin
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          found=0
-
-          EXTRA_ARGS=("-Djava.release=${JAVA_RELEASE}")
-
-          if [ -n "${PAPER_VERSION:-}" ]; then
-            EXTRA_ARGS+=("-Dpaper.version=${PAPER_VERSION}")
-          fi
-
-          echo "Maven overrides: ${EXTRA_ARGS[*]}"
-
-          while IFS= read -r -d '' pom; do
-            found=1
-
-            project_dir="$(dirname "$pom")"
-
-            echo "========================================"
-            echo "Building: $project_dir"
-            echo "========================================"
-
-            (
-              cd "$project_dir"
-
-              mvn -B -ntp -U \
-                -DskipTests \
-                "${EXTRA_ARGS[@]}" \
-                clean package
-            )
-
-          done < <(
-            find build-input \
-              -type f \
-              -name pom.xml \
-              -not -path '*/target/*' \
-              -print0
-          )
-
-          if [ "$found" -eq 0 ]; then
-            echo "ERROR: No pom.xml was found."
-            exit 1
-          fi
-
-      - name: Collect and rename JARs
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mapfile -t jars < <(
-            find build-input \
-              -type f \
-              -path '*/target/*.jar' \
-              ! -name '*-sources.jar' \
-              ! -name '*-javadoc.jar' \
-              ! -name 'original-*.jar' \
-              -print
-          )
-
-          if [ ${#jars[@]} -eq 0 ]; then
-            echo "ERROR: Maven completed but no plugin JAR was found."
-            exit 1
-          fi
-
-          rm -rf release-jars
-          mkdir -p release-jars
-
-          multiple=0
-          [ ${#jars[@]} -gt 1 ] && multiple=1
-
-          for jar in "${jars[@]}"; do
-
-            rel="${jar#build-input/}"
-            zipname="${rel%%/*}"
-
-            if [ -n "${JAR_NAME:-}" ]; then
-
-              if [ "$multiple" -eq 1 ]; then
-                out="release-jars/${JAR_NAME}-${zipname}.jar"
-              else
-                out="release-jars/${JAR_NAME}.jar"
-              fi
-
-            elif [ "$multiple" -eq 1 ]; then
-
-              out="release-jars/${zipname}-$(basename "$jar")"
-
-            else
-
-              out="release-jars/$(basename "$jar")"
-
-            fi
-
-            echo "Copying $jar -> $out"
-
-            cp "$jar" "$out"
-          done
-
-          echo "Final JARs:"
-          find release-jars \
-            -type f \
-            -name '*.jar' \
-            -print
-
-      - name: Upload DeathClone plugin JAR
-        uses: actions/upload-artifact@v4
+      - name: Install Rust with Android targets
+        uses: dtolnay/rust-toolchain@stable
         with:
-          name: DeathClone
-          path: release-jars/*.jar
-          if-no-files-found: error
-          retention-days: 30
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
-      - name: Create GitHub Release
-        if: ${{ github.event.inputs.make_release == 'true' }}
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and NDK
+        run: |
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Run Rust tests
+        working-directory: ${{ env.PROJECT }}/rust
+        run: cargo test --locked
+
+      - name: Build Rust engine for Android
+        working-directory: ${{ env.PROJECT }}/rust
+        run: >
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64
+          -o ../app/src/main/jniLibs
+          build --release --locked
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT }}
+        run: gradle assembleDebug --stacktrace
+
+      - name: Name the APK
+        run: cp "${{ env.PROJECT }}/app/build/outputs/apk/debug/app-debug.apk" ChatCraft.apk
+
+      - name: Publish APK as a GitHub Release (direct download, no zip)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: ${{ env.JAR_NAME != '' && env.JAR_NAME || 'DeathClone' }} build ${{ github.run_number }}
-          files: release-jars/*.jar
-          generate_release_notes: true
+          tag_name: apk-${{ github.run_number }}
+          name: ChatCraft APK #${{ github.run_number }}
+          files: ChatCraft.apk

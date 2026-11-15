@@ -24,6 +24,12 @@ jobs:
       # Finds project.godot even if the project was uploaded inside a subfolder.
       - name: Locate Godot project
         run: |
+          # If the project was uploaded as a .zip, unpack it here.
+          if [ -z "$(find . -name project.godot -not -path './.godot/*' | head -n1)" ]; then
+            for z in ./*.zip; do
+              [ -f "$z" ] && echo "Unzipping $z" && unzip -q -o "$z" -d unzipped_project
+            done
+          fi
           echo "Repository files (top level):"
           ls -la
           PF="$(find . -name project.godot -not -path './.godot/*' | head -n1)"
